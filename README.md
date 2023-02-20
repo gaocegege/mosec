@@ -3,17 +3,23 @@
 </p>
 
 <p align="center">
+  <a href="https://discord.gg/Jq5vxuH69W">
+    <img alt="discord invitation link" src="https://dcbadge.vercel.app/api/server/Jq5vxuH69W?style=flat">
+  </a>
   <a href="https://pypi.org/project/mosec/">
-      <img src="https://badge.fury.io/py/mosec.svg" alt="PyPI version" height="20">
+    <img src="https://badge.fury.io/py/mosec.svg" alt="PyPI version" height="20">
+  </a>
+  <a href="https://pypi.org/project/mosec">
+    <img src="https://img.shields.io/pypi/pyversions/mosec" alt="Python Version" />
   </a>
   <a href="https://pepy.tech/project/mosec">
-      <img src="https://pepy.tech/badge/mosec/month" alt="PyPi Downloads" height="20">
+    <img src="https://pepy.tech/badge/mosec/month" alt="PyPi Downloads" height="20">
   </a>
   <a href="https://tldrlegal.com/license/apache-license-2.0-(apache-2.0)">
-      <img src="https://img.shields.io/github/license/mosecorg/mosec" alt="License" height="20">
+    <img src="https://img.shields.io/github/license/mosecorg/mosec" alt="License" height="20">
   </a>
   <a href="https://github.com/mosecorg/mosec/actions/workflows/check.yml?query=workflow%3A%22lint+and+test%22+branch%3Amain">
-      <img src="https://github.com/mosecorg/mosec/actions/workflows/check.yml/badge.svg?branch=main" alt="Check status" height="20">
+    <img src="https://github.com/mosecorg/mosec/actions/workflows/check.yml/badge.svg?branch=main" alt="Check status" height="20">
   </a>
 </p>
 
@@ -21,25 +27,24 @@
   <i>Model Serving made Efficient in the Cloud.</i>
 </p>
 
-
 ## Introduction
 
 Mosec is a high-performance and flexible model serving framework for building ML model-enabled backend and microservices. It bridges the gap between any machine learning models you just trained and the efficient online service API.
 
-* **Highly performant**: web layer and task coordination built with Rust 🦀, which offers blazing speed in addition to efficient CPU utilization powered by async I/O
-* **Ease of use**: user interface purely in Python 🐍, by which users can serve their models in an ML framework-agnostic manner using the same code as they do for offline testing
-* **Dynamic batching**: aggregate requests from different users for batched inference and distribute results back
-* **Pipelined stages**: spawn multiple processes for pipelined stages to handle CPU/GPU/IO mixed workloads
-* **Cloud friendly**: designed to run in the cloud, with the model warmup, graceful shutdown, and Prometheus monitoring metrics, easily managed by Kubernetes or any container orchestration systems
-* **Do one thing well**: focus on the online serving part, users can pay attention to the model performance and business logic
-
+- **Highly performant**: web layer and task coordination built with Rust 🦀, which offers blazing speed in addition to efficient CPU utilization powered by async I/O
+- **Ease of use**: user interface purely in Python 🐍, by which users can serve their models in an ML framework-agnostic manner using the same code as they do for offline testing
+- **Dynamic batching**: aggregate requests from different users for batched inference and distribute results back
+- **Pipelined stages**: spawn multiple processes for pipelined stages to handle CPU/GPU/IO mixed workloads
+- **Cloud friendly**: designed to run in the cloud, with the model warmup, graceful shutdown, and Prometheus monitoring metrics, easily managed by Kubernetes or any container orchestration systems
+- **Do one thing well**: focus on the online serving part, users can pay attention to the model performance and business logic
 
 ## Installation
 
-Mosec requires Python 3.6 or above. Install the latest [PyPI package](https://pypi.org/project/mosec/) with:
+Mosec requires Python 3.7 or above. Install the latest [PyPI package](https://pypi.org/project/mosec/) with:
 
-    pip install -U mosec
-
+```shell
+> pip install -U mosec
+```
 
 ## Usage
 
@@ -82,7 +87,6 @@ class CalculateExp(Worker):
         return {"y": y}
 ```
 
-
 Finally, we append the worker to the server to construct a `single-stage workflow`, and we specify the number of processes we want it to run in parallel. Then we run the server.
 
 ```python
@@ -99,22 +103,45 @@ if __name__ == "__main__":
 
 After merging the snippets above into a file named `server.py`, we can first have a look at the command line arguments:
 
-    python server.py --help
+```shell
+> python server.py --help
+```
 
 Then let's start the server...
 
-    python server.py
+```shell
+> python server.py
+```
 
 and in another terminal, test it:
 
-    curl -X POST http://127.0.0.1:8000/inference -d '{"x": 2}'
+```console
+> curl -X POST http://127.0.0.1:8000/inference -d '{"x": 2}'
+{
+  "y": 7.38905609893065
+}
+
+> curl -X POST http://127.0.0.1:8000/inference -d '{"input": 2}' # wrong schema
+validation error: cannot find key 'x'
+```
 
 or check the metrics:
 
-    curl http://127.0.0.1:8000/metrics
+```shell
+> curl http://127.0.0.1:8000/metrics
+```
 
-That's it! You have just hosted your ***exponential-computing model*** as a server! 😉
+For more debug logs, you can enable it by changing the Python & Rust log level:
 
+```python
+logger.setLevel(logging.DEBUG)
+```
+
+```shell
+> RUST_LOG=debug python server.py
+```
+
+That's it! You have just hosted your **_exponential-computing model_** as a server! 😉
 
 ## Example
 
@@ -122,11 +149,21 @@ More ready-to-use examples can be found in the [Example](https://mosecorg.github
 
 - Multi-stage workflow
 - Batch processing worker
+- Shared memory IPC
+- Customized GPU allocation
+- Jax jitted inference
 - PyTorch deep learning models:
   - sentiment analysis
   - image recognition
+  - stable diffusion
 
-## Qualitative Comparison<sup>*</sup>
+## Contributing
+
+We welcome any kind of contribution. Please give us feedback by [raising issues](https://github.com/mosecorg/mosec/issues/new/choose) or discussing on [Discord](https://discord.gg/Jq5vxuH69W). You could also directly [contribute](https://mosecorg.github.io/mosec/contributing) your code and pull request!
+
+To start develop, you can use [envd](https://github.com/tensorchord/envd) to create an isolated and clean Python & Rust environment. Check the [envd-docs](https://envd.tensorchord.ai/) or [build.envd](./build.envd) for more information.
+
+## Qualitative Comparison<sup>\*</sup>
 
 |                                                             | Batcher | Pipeline | Parallel | I/O Format<sup>(1)</sup>                                                                                                                    | Framework<sup>(2)</sup> | Backend | Activity                                                                      |
 | ----------------------------------------------------------- | :-----: | :------: | :------: | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | ------- | ----------------------------------------------------------------------------- |
@@ -138,13 +175,9 @@ More ready-to-use examples can be found in the [Example](https://mosecorg.github
 | [Flask](https://github.com/pallets/flask)<sup>(3)</sup>     |    ❌    |    ❌     |    ❌     | Customizable                                                                                                                                | Agnostic                | Python  | ![](https://img.shields.io/github/last-commit/pallets/flask)                  |
 | **[Mosec](https://github.com/mosecorg/mosec)**              |    ✅    |    ✅     |    ✅     | Customizable                                                                                                                                | Agnostic                | Rust    | ![](https://img.shields.io/github/last-commit/mosecorg/mosec)                 |
 
-<sup>*As accessed on 08 Oct 2021. By no means is this comparison showing that other frameworks are inferior, but rather it is used to illustrate the trade-off. The information is not guaranteed to be absolutely accurate. Please let us know if you find anything that may be incorrect.</sup>
+
+<sup>\*As accessed on 08 Oct 2021. By no means is this comparison showing that other frameworks are inferior, but rather it is used to illustrate the trade-off. The information is not guaranteed to be absolutely accurate. Please let us know if you find anything that may be incorrect.</sup>
 
 <sup>**(1)**: Data format of the service's request and response. "Limited" in the sense that the framework has pre-defined requirements on the format.</sup>
 <sup>**(2)**: Supported machine learning frameworks. "Heavily" means the serving framework is designed towards a specific ML framework. Thus it is hard, if not impossible, to adapt to others. "Multiple" means the serving framework provides adaptation to several existing ML frameworks. "Agnostic" means the serving framework does not necessarily care about the ML framework. Hence it supports all ML frameworks (in Python).</sup>
 <sup>**(3)**: Flask is a representative of general purpose web frameworks to host ML models.</sup>
-
-
-## Contributing
-
-We welcome any kind of contribution. Please give us feedback by [raising issues](https://github.com/mosecorg/mosec/issues/new/choose) or directly [contribute](https://mosecorg.github.io/mosec/contributing) your code and pull request!

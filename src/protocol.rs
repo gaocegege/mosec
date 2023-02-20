@@ -1,3 +1,17 @@
+// Copyright 2022 MOSEC Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,7 +21,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Barrier;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::metrics::Metrics;
 use crate::tasks::{TaskCode, TaskManager};
@@ -104,7 +118,11 @@ pub(crate) async fn communicate(
                                     .observe(start_timer.elapsed().as_secs_f64());
                             }
                             _ => {
-                                info!(?ids, ?code, "abnormal tasks");
+                                warn!(
+                                    ?ids,
+                                    ?code,
+                                    "abnormal tasks, check Python log for more details"
+                                );
                             }
                         }
                     }
@@ -158,7 +176,15 @@ async fn read_message(
         ids.push(id);
         data.push(data_buf.into());
     }
-    debug!(?ids, ?code, ?num, ?flag, "received tasks from the stream");
+    let byte_size = data.iter().fold(0, |acc, x| acc + x.len());
+    debug!(
+        ?ids,
+        ?code,
+        ?num,
+        ?flag,
+        ?byte_size,
+        "received tasks from the stream"
+    );
     Ok(())
 }
 

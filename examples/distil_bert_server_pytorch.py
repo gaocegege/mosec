@@ -1,5 +1,20 @@
+# Copyright 2022 MOSEC Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Example: Mosec with Pytorch Distil BERT."""
+
 import logging
-from typing import List, TypeVar
+from typing import Any, List
 
 import torch  # type: ignore
 from transformers import (  # type: ignore
@@ -9,7 +24,8 @@ from transformers import (  # type: ignore
 
 from mosec import Server, Worker
 
-T = TypeVar("T")
+# type alias
+Returns = Any
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -24,6 +40,8 @@ INFERENCE_BATCH_SIZE = 32
 
 
 class Preprocess(Worker):
+    """Preprocess BERT on current setup."""
+
     def __init__(self):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -35,18 +53,20 @@ class Preprocess(Worker):
         # `data` is the raw bytes from the request body
         return data.decode()
 
-    def forward(self, data: str) -> T:
+    def forward(self, data: str) -> Returns:
         tokens = self.tokenizer.encode(data, add_special_tokens=True)
         return tokens
 
 
 class Inference(Worker):
+    """Pytorch Inference class"""
+
     def __init__(self):
         super().__init__()
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
-        logger.info(f"using computing device: {self.device}")
+        logger.info("using computing device: %s", self.device)
         self.model = AutoModelForSequenceClassification.from_pretrained(
             "distilbert-base-uncased-finetuned-sst-2-english"
         )
@@ -58,11 +78,13 @@ class Inference(Worker):
             [101, 2023, 2003, 1037, 8403, 4937, 999, 102] * 5  # make sentence longer
         ] * INFERENCE_BATCH_SIZE
 
-    def forward(self, data: List[T]) -> List[str]:
+    def forward(self, data: List[Returns]) -> List[str]:
         tensors = [torch.tensor(token) for token in data]
         with torch.no_grad():
             result = self.model(
-                torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True)
+                torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True).to(
+                    self.device
+                )
             )[0]
         scores = result.softmax(dim=1).cpu().tolist()
         return [f"positive={p}" for (_, p) in scores]

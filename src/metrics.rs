@@ -1,3 +1,17 @@
+// Copyright 2022 MOSEC Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use once_cell::sync::OnceCell;
 use prometheus::{
     exponential_buckets, register_histogram_vec, register_int_counter_vec, register_int_gauge,
@@ -20,13 +34,13 @@ impl Metrics {
     pub(crate) fn init_with_namespace(namespace: &str, timeout: u64) -> Self {
         Self {
             throughput: register_int_counter_vec!(
-                format!("{}_throughput", namespace),
+                format!("{namespace}_throughput"),
                 "service inference endpoint throughput",
                 &["code"]
             )
             .unwrap(),
             duration: register_histogram_vec!(
-                format!("{}_process_duration_second", namespace),
+                format!("{namespace}_process_duration_second"),
                 "process duration for each connection in each stage",
                 &["stage", "connection"],
                 exponential_buckets(1e-3f64, 2f64, (timeout as f64).log2().ceil() as usize + 1)
@@ -34,14 +48,14 @@ impl Metrics {
             )
             .unwrap(),
             batch_size: register_histogram_vec!(
-                format!("{}_batch_size", namespace),
+                format!("{namespace}_batch_size"),
                 "batch size for each connection in each stage",
                 &["stage", "connection"],
                 exponential_buckets(1f64, 2f64, 10).unwrap() // 1 ~ 512
             )
             .unwrap(),
             remaining_task: register_int_gauge!(
-                format!("{}_remaining_task", namespace),
+                format!("{namespace}_remaining_task"),
                 "remaining tasks for the whole service"
             )
             .unwrap(),

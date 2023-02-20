@@ -1,3 +1,17 @@
+// Copyright 2022 MOSEC Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -7,9 +21,10 @@ use once_cell::sync::OnceCell;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 use tokio::time;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::errors::ServiceError;
+use crate::metrics::Metrics;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TaskCode {
@@ -88,7 +103,7 @@ impl TaskManager {
     pub(crate) async fn submit_task(&self, data: Bytes) -> Result<Task, ServiceError> {
         let (id, rx) = self.add_new_task(data)?;
         if let Err(err) = time::timeout(self.timeout, rx).await {
-            error!(%id, %err, "task timeout");
+            warn!(%id, %err, "task timeout");
             let mut table = self.table.write();
             let mut notifiers = self.notifiers.lock();
             table.remove(&id);
@@ -124,7 +139,7 @@ impl TaskManager {
         debug!(%id, "add a new task");
 
         if self.channel.try_send(id).is_err() {
-            error!(%id, "the first channel is full, delete this task");
+            warn!(%id, "the first channel is full, delete this task");
             table.remove(&id);
             notifiers.remove(&id);
             return Err(ServiceError::TooManyRequests);
@@ -137,6 +152,12 @@ impl TaskManager {
         if let Some(sender) = notifiers.remove(&id) {
             if !sender.is_closed() {
                 sender.send(()).unwrap();
+            } else {
+                warn!(%id, "the notifier channel is already closed, will delete it");
+                let mut table = self.table.write();
+                table.remove(&id);
+                let metrics = Metrics::global();
+                metrics.remaining_task.dec();
             }
         } else {
             // if the task is already timeout, the notifier may be removed by another thread

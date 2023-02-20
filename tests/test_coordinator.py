@@ -1,4 +1,19 @@
+# Copyright 2022 MOSEC Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
+import logging
 import multiprocessing as mp
 import os
 import random
@@ -14,14 +29,18 @@ import msgpack  # type: ignore
 import pytest
 
 from mosec.coordinator import PROTOCOL_TIMEOUT, STAGE_EGRESS, STAGE_INGRESS, Coordinator
-from mosec.protocol import Protocol, _recv_all
+from mosec.mixin import MsgpackMixin
+from mosec.protocol import HTTPStautsCode, Protocol, _recv_all
 from mosec.worker import Worker
 
-from .mock_logger import MockLogger
 from .utils import imitate_controller_send
 
 socket_prefix = join(tempfile.gettempdir(), "test-mosec")
 stage = STAGE_INGRESS + STAGE_EGRESS
+
+
+logger = logging.getLogger()
+logger.addHandler(logging.StreamHandler())
 
 
 def clean_dir():
@@ -47,14 +66,8 @@ class EchoWorkerJSON(Worker):
         return data
 
 
-class EchoWorkerMSGPACK(EchoWorkerJSON):
-    @staticmethod
-    def deserialize(data):
-        return msgpack.unpackb(data)
-
-    @staticmethod
-    def serialize(data):
-        return msgpack.packb(data)
+class EchoWorkerMSGPACK(MsgpackMixin, EchoWorkerJSON):
+    """"""
 
 
 @pytest.fixture
@@ -65,6 +78,24 @@ def base_test_config():
         "worker_id": 1,
         "c_ctx": "spawn",
     }
+
+
+def test_coordinator_worker_property():
+    ctx = "spawn"
+    c = Coordinator(
+        EchoWorkerJSON,
+        max_batch_size=16,
+        stage=STAGE_EGRESS,
+        shutdown=mp.get_context(ctx).Event(),
+        shutdown_notify=mp.get_context(ctx).Event(),
+        socket_prefix="",
+        stage_id=2,
+        worker_id=3,
+        ipc_wrapper=None,
+    )
+    assert c.worker.stage == STAGE_EGRESS
+    assert c.worker.worker_id == 3
+    assert c.worker.max_batch_size == 16
 
 
 def make_coordinator_process(w_cls, c_ctx, shutdown, shutdown_notify, config):
@@ -79,36 +110,38 @@ def make_coordinator_process(w_cls, c_ctx, shutdown, shutdown_notify, config):
             socket_prefix,
             config["stage_id"],
             config["worker_id"],
+            None,
         ),
         daemon=True,
     )
 
 
-def test_socket_file_not_found(mocker, base_test_config):
-    mocker.patch("mosec.coordinator.logger", MockLogger())
+def test_socket_file_not_found(mocker, base_test_config, caplog):
     mocker.patch("mosec.coordinator.CONN_MAX_RETRY", 5)
-    mocker.patch("mosec.coordinator.CONN_CHECK_INTERVAL", 0.1)
+    mocker.patch("mosec.coordinator.CONN_CHECK_INTERVAL", 0.01)
 
     c_ctx = base_test_config.pop("c_ctx")
     shutdown = mp.get_context(c_ctx).Event()
     shutdown_notify = mp.get_context(c_ctx).Event()
 
     with CleanDirContext():
-        with pytest.raises(RuntimeError, match=r".*cannot find.*"):
+        with caplog.at_level(logging.ERROR):
             _ = Coordinator(
                 EchoWorkerJSON,
                 stage=stage,
                 shutdown=shutdown,
                 shutdown_notify=shutdown_notify,
                 socket_prefix=socket_prefix,
+                ipc_wrapper=None,
                 **base_test_config,
             )
+            record = caplog.records[0]
+            assert "cannot find the socket file" in record.message
 
 
-def test_incorrect_socket_file(mocker, base_test_config):
-    mocker.patch("mosec.coordinator.logger", MockLogger())
+def test_incorrect_socket_file(mocker, base_test_config, caplog):
     mocker.patch("mosec.coordinator.CONN_MAX_RETRY", 5)
-    mocker.patch("mosec.coordinator.CONN_CHECK_INTERVAL", 0.1)
+    mocker.patch("mosec.coordinator.CONN_CHECK_INTERVAL", 0.01)
 
     sock_addr = join(socket_prefix, f"ipc_{base_test_config.get('stage_id')}.socket")
     c_ctx = base_test_config.pop("c_ctx")
@@ -120,15 +153,18 @@ def test_incorrect_socket_file(mocker, base_test_config):
         # create non-socket file
         open(sock_addr, "w").close()
 
-        with pytest.raises(RuntimeError, match=r".*connection error*"):
+        with caplog.at_level(logging.ERROR):
             _ = Coordinator(
                 EchoWorkerJSON,
                 stage=stage,
                 shutdown=shutdown,
                 shutdown_notify=shutdown_notify,
                 socket_prefix=socket_prefix,
+                ipc_wrapper=None,
                 **base_test_config,
             )
+            record = caplog.records[0]
+            assert "connection error" in record.message
 
     with CleanDirContext():
         os.makedirs(socket_prefix, exist_ok=False)
@@ -136,15 +172,19 @@ def test_incorrect_socket_file(mocker, base_test_config):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(sock_addr)
 
-        with pytest.raises(RuntimeError, match=r".*Connection refused.*"):
+        with caplog.at_level(logging.ERROR):
+            # with pytest.raises(RuntimeError, match=r".*Connection refused.*"):
             _ = Coordinator(
                 EchoWorkerJSON,
                 stage=stage,
                 shutdown=shutdown,
                 shutdown_notify=shutdown_notify,
                 socket_prefix=socket_prefix,
+                ipc_wrapper=None,
                 **base_test_config,
             )
+            record = caplog.records[0]
+            assert "socket connection error" in record.message
 
 
 @pytest.mark.parametrize(
@@ -174,9 +214,13 @@ def test_incorrect_socket_file(mocker, base_test_config):
         ),
     ],
 )
-def test_echo(mocker, base_test_config, test_data, worker, deserializer):
-    mocker.patch("mosec.coordinator.logger", MockLogger())
+def test_echo_batch(base_test_config, test_data, worker, deserializer):
+    """To test the batched data echo functionality. The batch size is automatically
+    determined by the data's size.
+    """
     c_ctx = base_test_config.pop("c_ctx")
+    # whatever value greater than 1, so that coordinator
+    # knows this stage enables batching
     base_test_config["max_batch_size"] = 8
 
     sock_addr = join(socket_prefix, f"ipc_{base_test_config.get('stage_id')}.socket")
@@ -191,7 +235,11 @@ def test_echo(mocker, base_test_config, test_data, worker, deserializer):
         sock.listen()
 
         coordinator_process = make_coordinator_process(
-            worker, c_ctx, shutdown, shutdown_notify, base_test_config
+            worker,
+            c_ctx,
+            shutdown,
+            shutdown_notify,
+            base_test_config,
         )
         coordinator_process.start()
 
@@ -211,7 +259,7 @@ def test_echo(mocker, base_test_config, test_data, worker, deserializer):
                 got_ids.append(conn.recv(4))
                 got_length = struct.unpack("!I", conn.recv(4))[0]
                 got_payloads.append(_recv_all(conn, got_length))
-            assert got_flag == Protocol.FLAG_OK
+            assert got_flag == HTTPStautsCode.OK
             assert got_ids == sent_ids
             assert all(
                 [

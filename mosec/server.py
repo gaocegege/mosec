@@ -1,21 +1,42 @@
+# Copyright 2022 MOSEC Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""MOSEC server interface.
+
+This module provides a way to define the service components for machine learning
+model serving.
+"""
+
+import contextlib
 import logging
 import multiprocessing as mp
 import os
+import shutil
 import signal
 import subprocess
 import traceback
-from contextlib import ContextDecorator
+from functools import partial
 from multiprocessing.synchronize import Event
-from os.path import exists
 from pathlib import Path
-from shutil import rmtree
 from time import monotonic, sleep
 from typing import Dict, List, Optional, Type, Union
 
 import pkg_resources
 
-from .args import ArgParser
+from .args import parse_arguments
 from .coordinator import STAGE_EGRESS, STAGE_INGRESS, Coordinator
+from .ipc import IPCWrapper
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -26,9 +47,9 @@ NEW_PROCESS_METHOD = {"spawn", "fork"}
 
 
 class Server:
-    """
-    This public class defines the mosec server interface. It allows
-    users to sequentially append workers they implemented, builds
+    """MOSEC server interface.
+
+    It allows users to sequentially append workers they implemented, builds
     the workflow pipeline automatically and starts up the server.
 
     ###### Batching
@@ -38,9 +59,24 @@ class Server:
     ###### Multiprocess
     > The user may spawn multiple processes for any stage when the
     corresponding worker is appended, by setting the `num`.
+
+    ###### IPC Wrapper
+    > The user may wrap the inter-process communication to use shared memory,
+    e.g. pyarrow plasma, by providing the IPC wrapper for the server.
     """
 
-    def __init__(self):
+    # pylint: disable=too-many-instance-attributes
+    def __init__(
+        self,
+        ipc_wrapper: Optional[Union[IPCWrapper, partial]] = None,
+    ):
+        """Initialize a MOSEC Server.
+
+        Args:
+            ipc_wrapper (Optional[Union[IPCWrapper, partial]], optional):
+                IPCWrapper class. Defaults to None.
+        """
+        self.ipc_wrapper = ipc_wrapper
 
         self._worker_cls: List[Type[Worker]] = []
         self._worker_num: List[int] = []
@@ -52,7 +88,9 @@ class Server:
         self._coordinator_shutdown: Event = mp.get_context("spawn").Event()
         self._coordinator_shutdown_notify: Event = mp.get_context("spawn").Event()
 
-        self._controller_process: Optional[mp.Process] = None
+        self._controller_process: Optional[subprocess.Popen] = None
+
+        self._daemon: Dict[str, Union[subprocess.Popen, mp.Process]] = {}
 
         self._configs: dict = {}
 
@@ -78,15 +116,15 @@ class Server:
             assert isinstance(
                 number, int
             ), f"{name} must be integer but you give {type(number)}"
-            assert number >= 1, f"{name} must be greater than 1"
+            assert number >= 1, f"{name} must be no less than 1"
 
         def validate_env():
             if env is None:
                 return
 
             def validate_str_dict(dictionary: Dict):
-                for k, v in dictionary.items():
-                    if not (isinstance(k, str) and isinstance(v, str)):
+                for key, value in dictionary.items():
+                    if not (isinstance(key, str) and isinstance(value, str)):
                         return False
                 return True
 
@@ -94,7 +132,7 @@ class Server:
             valid = True
             if not isinstance(env, List):
                 valid = False
-            elif not all([isinstance(x, Dict) and validate_str_dict(x) for x in env]):
+            elif not all(isinstance(x, Dict) and validate_str_dict(x) for x in env):
                 valid = False
             assert valid, "env must be a list of string dictionary"
 
@@ -106,39 +144,52 @@ class Server:
             start_method in NEW_PROCESS_METHOD
         ), f"start method must be one of {NEW_PROCESS_METHOD}"
 
-    def _parse_args(self):
-        self._configs = vars(ArgParser.parse())
-        logger.info(f"Mosec Server Configurations: {self._configs}")
+    def _check_daemon(self):
+        for name, proc in self._daemon.items():
+            if proc is None:
+                continue
+            code = None
+            if isinstance(proc, mp.Process):
+                code = proc.exitcode
+            elif isinstance(proc, subprocess.Popen):
+                code = proc.poll()
+
+            if code:
+                self._terminate(
+                    code,
+                    f"mosec daemon [{name}] exited on error code: {code}",
+                )
 
     def _controller_args(self):
         args = []
-        for k, v in self._configs.items():
-            args.extend([f"--{k}", str(v)])
-        args.extend(["--batches"] + list(map(str, self._worker_mbs)))
+        for key, value in self._configs.items():
+            args.extend([f"--{key}", str(value)])
+        for batch_size in self._worker_mbs:
+            args.extend(["--batches", str(batch_size)])
+        logger.info("Mosec Server Configurations: %s", args)
         return args
 
     def _start_controller(self):
-        """Subprocess to start controller program"""
+        """Subprocess to start controller program."""
+        self._configs = vars(parse_arguments())
         if not self._server_shutdown:
-            path = self._configs["path"]
-            if exists(path):
-                logger.info(f"path already exists, try to remove it: {path}")
-                rmtree(path)
             path = Path(pkg_resources.resource_filename("mosec", "bin"), "mosec")
+            # pylint: disable=consider-using-with
             self._controller_process = subprocess.Popen(
                 [path] + self._controller_args()
             )
+            self.register_daemon("controller", self._controller_process)
 
     def _terminate(self, signum, framestack):
-        logger.info(f"[{signum}] terminating server [{framestack}] ...")
+        logger.info("[%s] terminating server [%s] ...", signum, framestack)
         self._server_shutdown = True
 
     @staticmethod
     def _clean_pools(
         processes: List[Union[mp.Process, None]],
     ) -> List[Union[mp.Process, None]]:
-        for i, p in enumerate(processes):
-            if p is None or p.exitcode is not None:
+        for i, process in enumerate(processes):
+            if process is None or process.exitcode is not None:
                 processes[i] = None
         return processes
 
@@ -167,7 +218,7 @@ class Server:
                     # this stage might contain bugs
                     self._terminate(
                         1,
-                        f"all workers at stage {stage_id} exited;"
+                        f"all the {w_cls.__name__} workers at stage {stage_id} exited;"
                         " please check for bugs or socket connection issues",
                     )
                     break
@@ -183,7 +234,7 @@ class Server:
                     if self._coordinator_pools[stage_id][worker_id] is not None:
                         continue
 
-                    coordinator_process = mp.get_context(c_ctx).Process(
+                    coordinator_process = mp.get_context(c_ctx).Process(  # type: ignore
                         target=Coordinator,
                         args=(
                             w_cls,
@@ -194,26 +245,21 @@ class Server:
                             self._configs["path"],
                             stage_id + 1,
                             worker_id + 1,
+                            self.ipc_wrapper,
                         ),
                         daemon=True,
                     )
 
-                    with EnvContext(c_env, worker_id):
+                    with env_var_context(c_env, worker_id):
                         coordinator_process.start()
 
                     self._coordinator_pools[stage_id][worker_id] = coordinator_process
             first = False
-            if self._controller_process:
-                ctr_exitcode = self._controller_process.poll()
-                if ctr_exitcode:
-                    self._terminate(
-                        ctr_exitcode,
-                        f"mosec controller exited on error: {ctr_exitcode}",
-                    )
+            self._check_daemon()
             sleep(GUARD_CHECK_INTERVAL)
 
     def _halt(self):
-        """Graceful shutdown"""
+        """Graceful shutdown."""
         # notify coordinators for the shutdown
         self._coordinator_shutdown_notify.set()
 
@@ -226,7 +272,7 @@ class Server:
                 if ctr_exitcode is not None:  # exited
                     if ctr_exitcode:  # on error
                         logger.error(
-                            f"mosec controller halted on error: {ctr_exitcode}"
+                            "mosec controller halted on error: %d", ctr_exitcode
                         )
                     else:
                         logger.info("mosec controller halted normally")
@@ -235,8 +281,21 @@ class Server:
 
         # shutdown coordinators
         self._coordinator_shutdown.set()
-
+        shutil.rmtree(self._configs["path"], ignore_errors=True)
         logger.info("mosec server exited. see you.")
+
+    def register_daemon(self, name: str, proc: subprocess.Popen):
+        """Register a daemon to be monitored.
+
+        Args:
+            name (str): the name of this daemon
+            proc (mp.Process): the process handle of the daemon
+        """
+        assert isinstance(name, str), "daemon name should be a string"
+        assert isinstance(
+            proc, (mp.Process, subprocess.Popen)
+        ), f"{type(proc)} is not a process or subprocess"
+        self._daemon[name] = proc
 
     def append_worker(
         self,
@@ -246,8 +305,7 @@ class Server:
         start_method: str = "spawn",
         env: Union[None, List[Dict[str, str]]] = None,
     ):
-        """
-        This method sequentially appends workers to the workflow pipeline.
+        """Sequentially appends workers to the workflow pipeline.
 
         Arguments:
             worker: the class you inherit from `Worker` which implements
@@ -257,7 +315,6 @@ class Server:
             start_method: the process starting method ("spawn" or "fork")
             env: the environment variables to set before starting the process
         """
-
         self._validate_arguments(worker, num, max_batch_size, start_method, env)
         self._worker_cls.append(worker)
         self._worker_num.append(num)
@@ -267,34 +324,27 @@ class Server:
         self._coordinator_pools.append([None] * num)
 
     def run(self):
-        """
-        This method starts the mosec model server!
-        """
+        """Start the mosec model server."""
         self._validate_server()
-        self._parse_args()
         self._start_controller()
         try:
             self._manage_coordinators()
+        # pylint: disable=broad-except
         except Exception:
             logger.error(traceback.format_exc().replace("\n", " "))
         self._halt()
 
 
-class EnvContext(ContextDecorator):
-    def __init__(self, env: Union[None, List[Dict[str, str]]], id: int) -> None:
-        super().__init__()
-        self.default: Dict = {}
-        self.env = env
-        self.id = id
-
-    def __enter__(self):
-        if self.env is not None:
-            for k, v in self.env[self.id].items():
-                self.default[k] = os.getenv(k, "")
-                os.environ[k] = v
-        return self
-
-    def __exit__(self, *exc):
-        for k, v in self.default.items():
-            os.environ[k] = v
-        return False
+@contextlib.contextmanager
+def env_var_context(env: Union[None, List[Dict[str, str]]], index: int):
+    """Manage the environment variables for a worker process."""
+    default: Dict = {}
+    try:
+        if env is not None:
+            for key, value in env[index].items():
+                default[key] = os.getenv(key, "")
+                os.environ[key] = value
+        yield None
+    finally:
+        for key, value in default.items():
+            os.environ[key] = value
